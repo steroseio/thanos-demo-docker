@@ -1,0 +1,21 @@
+# Prometheus replica B. Scrapes node + go, plus the shared target.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    cluster: demo
+    replica: B
+
+scrape_configs:
+  - job_name: node
+    static_configs:
+      - targets: ['app-node:3000']
+
+  - job_name: go
+    static_configs:
+      - targets: ['app-go:2112']
+
+  # Scraped by BOTH Prometheus servers -> Thanos dedupes these by replica label.
+  - job_name: shared
+    static_configs:
+      - targets: ['app-shared:9000']

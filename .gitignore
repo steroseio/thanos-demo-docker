@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+apps/springboot/target/
+node_modules/

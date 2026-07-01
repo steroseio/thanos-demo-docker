@@ -1,0 +1,22 @@
+# Prometheus replica A. Scrapes python + springboot, plus the shared target.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    cluster: demo
+    replica: A
+
+scrape_configs:
+  - job_name: python
+    static_configs:
+      - targets: ['app-python:8000']
+
+  - job_name: springboot
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['app-springboot:8080']
+
+  # Scraped by BOTH Prometheus servers -> Thanos dedupes these by replica label.
+  - job_name: shared
+    static_configs:
+      - targets: ['app-shared:9000']

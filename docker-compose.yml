@@ -1,0 +1,175 @@
+name: thanos-unification-demo
+
+networks:
+  demo:
+
+volumes:
+  prom1-data:
+  prom2-data:
+  minio-data:
+  grafana-data:
+
+services:
+  # ------------------------------------------------------------------ apps
+  app-python:
+    build: ./apps/python
+    ports: ["8001:8000"]
+    networks: [demo]
+
+  app-node:
+    build: ./apps/node
+    ports: ["8002:3000"]
+    networks: [demo]
+
+  app-go:
+    build: ./apps/go
+    ports: ["8003:2112"]
+    networks: [demo]
+
+  app-springboot:
+    build: ./apps/springboot
+    ports: ["8004:8080"]
+    networks: [demo]
+
+  # Scraped by BOTH Prometheus servers -> used to demonstrate Thanos dedup.
+  app-shared:
+    build: ./apps/shared
+    ports: ["8005:9000"]
+    networks: [demo]
+
+  # ------------------------------------------------------------ prometheus
+  prometheus-1:
+    image: prom/prometheus:v2.51.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # min == max disables local compaction, required for the Thanos sidecar.
+      - --storage.tsdb.min-block-duration=2h
+      - --storage.tsdb.max-block-duration=2h
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus-1.yml:/etc/prometheus/prometheus.yml:ro
+      - prom1-data:/prometheus
+    ports: ["9091:9090"]
+    networks: [demo]
+    depends_on: [app-python, app-springboot, app-shared]
+
+  prometheus-2:
+    image: prom/prometheus:v2.51.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.min-block-duration=2h
+      - --storage.tsdb.max-block-duration=2h
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus-2.yml:/etc/prometheus/prometheus.yml:ro
+      - prom2-data:/prometheus
+    ports: ["9092:9090"]
+    networks: [demo]
+    depends_on: [app-node, app-go, app-shared]
+
+  # ----------------------------------------------------- object storage (S3)
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console
+    volumes:
+      - minio-data:/data
+    networks: [demo]
+
+  # One-shot: wait for MinIO, then create the "thanos" bucket.
+  minio-init:
+    image: minio/mc:latest
+    depends_on: [minio]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        until /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin; do
+        echo 'waiting for minio...'; sleep 2; done;
+        /usr/bin/mc mb --ignore-existing local/thanos;
+        echo 'bucket ready';
+    networks: [demo]
+
+  # --------------------------------------------------------- thanos sidecars
+  thanos-sidecar-1:
+    image: thanosio/thanos:v0.34.1
+    command:
+      - sidecar
+      - --tsdb.path=/prometheus
+      - --prometheus.url=http://prometheus-1:9090
+      - --grpc-address=0.0.0.0:10901
+      - --http-address=0.0.0.0:10902
+      - --objstore.config-file=/etc/thanos/bucket.yml
+    volumes:
+      - prom1-data:/prometheus
+      - ./thanos/bucket.yml:/etc/thanos/bucket.yml:ro
+    networks: [demo]
+    depends_on:
+      prometheus-1:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+
+  thanos-sidecar-2:
+    image: thanosio/thanos:v0.34.1
+    command:
+      - sidecar
+      - --tsdb.path=/prometheus
+      - --prometheus.url=http://prometheus-2:9090
+      - --grpc-address=0.0.0.0:10901
+      - --http-address=0.0.0.0:10902
+      - --objstore.config-file=/etc/thanos/bucket.yml
+    volumes:
+      - prom2-data:/prometheus
+      - ./thanos/bucket.yml:/etc/thanos/bucket.yml:ro
+    networks: [demo]
+    depends_on:
+      prometheus-2:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+
+  # --------------------------------------------------------- thanos query
+  thanos-query:
+    image: thanosio/thanos:v0.34.1
+    command:
+      - query
+      - --http-address=0.0.0.0:9090
+      - --grpc-address=0.0.0.0:10903
+      - --query.replica-label=replica          # dedup key
+      - --endpoint=thanos-sidecar-1:10901       # replica A live data
+      - --endpoint=thanos-sidecar-2:10901       # replica B live data
+    ports: ["9090:9090"]
+    networks: [demo]
+    depends_on: [thanos-sidecar-1, thanos-sidecar-2]
+
+  # --------------------------------------------------------------- grafana
+  grafana:
+    # Pinned (not :latest) so the version can't drift mid-demo. This matches the
+    # build you already pulled.
+    image: grafana/grafana:13.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      # v13 only supports Viewer for anonymous access; Admin is deprecated.
+      # Anonymous users get read-only dashboards; log in as admin/admin to edit.
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Repeated failed logins otherwise lock the account for a few minutes and
+      # return "invalid username or password" even when it's correct.
+      GF_SECURITY_DISABLE_BRUTE_FORCE_LOGIN_PROTECTION: "true"
+    ports: ["3001:3000"]   # host 3001 to avoid clashing with other local Grafanas (e.g. minikube)
+    volumes:
+      # Named volume for Grafana's DB so state is predictable (not an anonymous
+      # volume). Wipe with `docker compose down -v` or `docker volume rm`.
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks: [demo]
+    depends_on: [thanos-query]
