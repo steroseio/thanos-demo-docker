@@ -71,7 +71,7 @@ services:
 
   # ----------------------------------------------------- object storage (S3)
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -85,7 +85,7 @@ services:
 
   # One-shot: wait for MinIO, then create the "thanos" bucket.
   minio-init:
-    image: minio/mc:latest
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on: [minio]
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -164,6 +164,12 @@ services:
       # Repeated failed logins otherwise lock the account for a few minutes and
       # return "invalid username or password" even when it's correct.
       GF_SECURITY_DISABLE_BRUTE_FORCE_LOGIN_PROTECTION: "true"
+      # Keep Grafana fully offline: no update checks, plugin-catalog calls, or
+      # usage reporting to grafana.com (avoids delays/errors with no internet).
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
     ports: ["3001:3000"]   # host 3001 to avoid clashing with other local Grafanas (e.g. minikube)
     volumes:
       # Named volume for Grafana's DB so state is predictable (not an anonymous
